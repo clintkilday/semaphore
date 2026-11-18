@@ -1,0 +1,20 @@
+---
+# Read-only: report the nginx/OpenResty version inside the NPM container.
+- name: NPM nginx version
+  hosts: npm-vm105
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Query versions
+      ansible.builtin.shell: |
+        docker exec npm-app-1 nginx -V 2>&1 | head -3
+        echo "--- http2 in generated configs:"
+        docker exec npm-app-1 sh -c 'grep -rlE "listen .*http2|http2 on" /data/nginx 2>/dev/null | wc -l'
+      args:
+        executable: /bin/bash
+      register: out
+      changed_when: false
+
+    - name: Show
+      ansible.builtin.debug:
+        var: out.stdout_lines
