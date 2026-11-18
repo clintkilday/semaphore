@@ -1,0 +1,32 @@
+---
+# Reboot the NPM VM every second week. Semaphore runs this weekly;
+# odd ISO weeks are skipped so the effective cadence is fortnightly.
+- name: Fortnightly reboot of Nginx Proxy Manager server
+  hosts: npm
+  become: true
+  gather_facts: true
+  vars:
+    iso_week: "{{ lookup('pipe', 'date +%V') | int }}"
+    force_reboot: false
+  tasks:
+    - name: Skip on off-weeks
+      ansible.builtin.meta: end_play
+      when: (iso_week | int) is odd and not (force_reboot | bool)
+
+    - name: Reboot and wait for SSH to return
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        msg: "Scheduled fortnightly reboot via Semaphore"
+
+    - name: Verify NPM containers came back
+      ansible.builtin.command: 'docker ps --format "{% raw %}{{.Names}} {{.Status}}{% endraw %}"'
+      register: docker_ps
+      changed_when: false
+      failed_when: false
+      retries: 6
+      delay: 10
+      until: docker_ps.stdout | length > 0
+
+    - name: Show containers
+      ansible.builtin.debug:
+        var: docker_ps.stdout_lines
