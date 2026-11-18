@@ -1,6 +1,8 @@
 ---
 # Reboot managed VMs every second week, one at a time. Semaphore runs this
 # weekly; odd ISO weeks are skipped so the cadence is fortnightly.
+# Uses a fire-and-forget reboot plus a fresh reconnect instead of the
+# reboot module, which hung waiting on a stale SSH connection under Semaphore.
 - name: Fortnightly reboot of managed VMs
   hosts: all
   serial: 1
@@ -14,10 +16,30 @@
       ansible.builtin.meta: end_play
       when: (iso_week | int) is odd and not (force_reboot | bool)
 
-    - name: Reboot and wait for SSH to return
-      ansible.builtin.reboot:
-        reboot_timeout: 900
-        msg: "Scheduled fortnightly reboot via Semaphore"
+    - name: Record current boot id
+      ansible.builtin.command: cat /proc/sys/kernel/random/boot_id
+      register: boot_before
+      changed_when: false
+
+    - name: Trigger reboot in the background
+      ansible.builtin.shell: sleep 3 && systemctl reboot
+      async: 60
+      poll: 0
+      changed_when: true
+
+    - name: Drop the old SSH connection
+      ansible.builtin.meta: reset_connection
+
+    - name: Wait for the host to go down and come back
+      ansible.builtin.wait_for_connection:
+        delay: 30
+        timeout: 900
+
+    - name: Confirm the host really rebooted
+      ansible.builtin.command: cat /proc/sys/kernel/random/boot_id
+      register: boot_after
+      changed_when: false
+      failed_when: boot_after.stdout == boot_before.stdout
 
     - name: Look for Docker
       ansible.builtin.stat:
@@ -28,7 +50,7 @@
       ansible.builtin.command: 'docker ps --format "{% raw %}{{.Names}} {{.Status}}{% endraw %}"'
       register: docker_ps
       changed_when: false
-      retries: 6
+      retries: 12
       delay: 10
       until: docker_ps.rc == 0 and docker_ps.stdout | length > 0
       when: docker_bin.stat.exists
