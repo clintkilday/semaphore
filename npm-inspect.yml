@@ -1,0 +1,24 @@
+---
+# Read-only: show how Nginx Proxy Manager is deployed on the host.
+- name: Inspect Nginx Proxy Manager deployment
+  hosts: npm-vm105
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Inspect containers
+      ansible.builtin.shell: |
+        for c in $(docker ps -aq); do
+          echo "== $(docker inspect -f '{{ '{{' }}.Name{{ '}}' }} image={{ '{{' }}.Config.Image{{ '}}' }} status={{ '{{' }}.State.Status{{ '}}' }}' $c)"
+          docker inspect -f 'compose_dir={{ '{{' }}index .Config.Labels "com.docker.compose.project.working_dir"{{ '}}' }} files={{ '{{' }}index .Config.Labels "com.docker.compose.project.config_files"{{ '}}' }} svc={{ '{{' }}index .Config.Labels "com.docker.compose.service"{{ '}}' }}' $c
+          docker inspect -f '{{ '{{' }}range .Mounts{{ '}}' }}mount {{ '{{' }}.Source{{ '}}' }} -> {{ '{{' }}.Destination{{ '}}' }}{{ '\n' }}{{ '{{' }}end{{ '}}' }}' $c
+        done
+        echo "== images:"; docker images --format '{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }} {{ '{{' }}.ID{{ '}}' }} {{ '{{' }}.CreatedSince{{ '}}' }}' | head -10
+        echo "== disk:"; df -h / | tail -1
+      args:
+        executable: /bin/bash
+      register: out
+      changed_when: false
+
+    - name: Show
+      ansible.builtin.debug:
+        var: out.stdout_lines
