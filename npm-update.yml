@@ -1,7 +1,8 @@
 ---
-# Weekly OS update for the Nginx Proxy Manager VM (Debian, VM105)
-- name: Update Nginx Proxy Manager server
-  hosts: npm
+# Weekly OS update for managed Debian VMs (one host at a time)
+- name: Update managed VMs
+  hosts: all
+  serial: 1
   become: true
   tasks:
     - name: Update apt cache and apply all upgrades
@@ -22,12 +23,18 @@
       ansible.builtin.debug:
         msg: "Upgrade changed packages: {{ apt_result.changed }}; reboot pending: {{ reboot_flag.stat.exists }}"
 
-    - name: Confirm NPM container is still running (if Docker is present)
+    - name: Look for Docker
+      ansible.builtin.stat:
+        path: /usr/bin/docker
+      register: docker_bin
+
+    - name: List running containers
       ansible.builtin.command: 'docker ps --format "{% raw %}{{.Names}} {{.Status}}{% endraw %}"'
       register: docker_ps
       changed_when: false
-      failed_when: false
+      when: docker_bin.stat.exists
 
     - name: Show containers
       ansible.builtin.debug:
         var: docker_ps.stdout_lines
+      when: docker_bin.stat.exists
