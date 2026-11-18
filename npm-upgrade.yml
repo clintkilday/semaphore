@@ -1,0 +1,106 @@
+---
+# Upgrade Nginx Proxy Manager (Docker Compose) to a pinned version.
+# Safe order: pull image (no downtime) -> stop -> backup -> edit tag -> start
+# -> health check. Any failure after the stop restores the old compose file
+# and data and starts the previous version.
+- name: Upgrade Nginx Proxy Manager
+  hosts: npm-vm105
+  become: true
+  gather_facts: true
+  vars:
+    npm_dir: /home/clint/docker/npm
+    npm_image: jc21/nginx-proxy-manager
+    npm_target_version: "2.17.0"
+    npm_api_url: http://127.0.0.1:81/api/
+    backup_dir: "{{ npm_dir }}/backups"
+    stamp: "{{ ansible_date_time.iso8601_basic_short }}"
+  tasks:
+    - name: Read current compose file
+      ansible.builtin.slurp:
+        src: "{{ npm_dir }}/docker-compose.yml"
+      register: compose_raw
+
+    - name: Work out the current image tag
+      ansible.builtin.set_fact:
+        compose_text: "{{ compose_raw.content | b64decode }}"
+        current_tag: "{{ (compose_raw.content | b64decode) | regex_search('jc21/nginx-proxy-manager:([^\\s\\x27\"]+)', '\\1') | first | default('unknown') }}"
+
+    - name: Stop if already on the target version
+      ansible.builtin.meta: end_host
+      when: current_tag == npm_target_version
+
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: "Upgrading NPM from {{ current_tag }} to {{ npm_target_version }}"
+
+    - name: Pull the new image first (fails here, before any change, if the tag is missing)
+      ansible.builtin.command: "docker pull {{ npm_image }}:{{ npm_target_version }}"
+      changed_when: true
+
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Upgrade with automatic rollback
+      block:
+        - name: Stop NPM
+          ansible.builtin.command: docker compose stop
+          args:
+            chdir: "{{ npm_dir }}"
+          changed_when: true
+
+        - name: Back up data, certificates and compose file
+          ansible.builtin.command: >-
+            tar czf {{ backup_dir }}/npm-{{ current_tag }}-{{ stamp }}.tgz
+            -C {{ npm_dir }} data letsencrypt docker-compose.yml
+          changed_when: true
+
+        - name: Point compose at the new image tag
+          ansible.builtin.replace:
+            path: "{{ npm_dir }}/docker-compose.yml"
+            regexp: '(jc21/nginx-proxy-manager:)[^\s''"]+'
+            replace: '\g<1>{{ npm_target_version }}'
+
+        - name: Start the new version
+          ansible.builtin.command: docker compose up -d
+          args:
+            chdir: "{{ npm_dir }}"
+          changed_when: true
+
+        - name: Wait for the NPM API to answer
+          ansible.builtin.uri:
+            url: "{{ npm_api_url }}"
+            return_content: true
+          register: api
+          retries: 18
+          delay: 10
+          until: api.status == 200
+          delegate_to: "{{ inventory_hostname }}"
+
+        - name: Report running version
+          ansible.builtin.debug:
+            msg: "NPM API says: {{ api.json.version | default(api.content) }}"
+
+      rescue:
+        - name: Roll back - stop the new container
+          ansible.builtin.command: docker compose stop
+          args:
+            chdir: "{{ npm_dir }}"
+          failed_when: false
+
+        - name: Roll back - restore data, certificates and compose file
+          ansible.builtin.command: >-
+            tar xzf {{ backup_dir }}/npm-{{ current_tag }}-{{ stamp }}.tgz
+            -C {{ npm_dir }}
+          failed_when: false
+
+        - name: Roll back - start the previous version
+          ansible.builtin.command: docker compose up -d
+          args:
+            chdir: "{{ npm_dir }}"
+
+        - name: Fail the run so the rollback is visible
+          ansible.builtin.fail:
+            msg: "Upgrade to {{ npm_target_version }} failed; rolled back to {{ current_tag }}. Backup: {{ backup_dir }}/npm-{{ current_tag }}-{{ stamp }}.tgz"
