@@ -1,0 +1,119 @@
+---
+# Configure a fresh Ubuntu VM: qemu guest agent, Docker Engine, Docker Compose
+# plugin, and the standard Docker post-install steps.
+# Run against the new VM(s) via an inventory that contains them.
+- name: Set up Docker VM
+  hosts: all
+  become: true
+  vars:
+    docker_user: clint
+    # Docker's apt repo may lag behind a brand-new Ubuntu release. If the
+    # install fails with "no repository", set this to the latest supported
+    # codename (e.g. noble).
+    docker_repo_codename: "{{ ansible_distribution_release }}"
+    docker_log_max_size: 10m
+    docker_log_max_file: "3"
+  tasks:
+    - name: Update apt cache and apply pending upgrades
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+
+    - name: Install guest agent and prerequisites
+      ansible.builtin.apt:
+        name:
+          - qemu-guest-agent
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+
+    - name: Enable and start the QEMU guest agent
+      ansible.builtin.systemd:
+        name: qemu-guest-agent
+        enabled: true
+        state: started
+
+    - name: Create apt keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker's GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker's apt repository
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: https://download.docker.com/linux/ubuntu
+        suites: "{{ docker_repo_codename }}"
+        components: stable
+        architectures: "{{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }}"
+        signed_by: /etc/apt/keyrings/docker.asc
+        state: present
+
+    - name: Install Docker Engine, Buildx and Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    # --- Docker post-install steps ---
+    - name: Create the docker group
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Add the user to the docker group
+      ansible.builtin.user:
+        name: "{{ docker_user }}"
+        groups: docker
+        append: true
+
+    - name: Limit container log size (post-install best practice)
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": { "max-size": "{{ docker_log_max_size }}", "max-file": "{{ docker_log_max_file }}" }
+          }
+        mode: "0644"
+      notify: Restart docker
+
+    - name: Start Docker and containerd on boot
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker
+        - containerd
+
+    - name: Verify docker and compose
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - docker --version
+        - docker compose version
+      register: versions
+      changed_when: false
+
+    - name: Show versions
+      ansible.builtin.debug:
+        msg: "{{ versions.results | map(attribute='stdout') | list }}"
+
+  handlers:
+    - name: Restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted

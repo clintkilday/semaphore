@@ -1,0 +1,111 @@
+---
+# Create a new Ubuntu VM on Proxmox by cloning a Cloud-Init template.
+# Runs on the Semaphore host (localhost) and talks to the Proxmox API.
+#
+# Requirements on the Semaphore host: python3 modules `proxmoxer` and `requests`.
+# Secrets: put proxmox_api_token_secret in a Semaphore Variable Group / environment
+# (secret), never in this repo.
+#
+# Required extra vars (Semaphore survey): vm_name, vm_id, vm_ip (e.g. 192.168.1.50/24)
+- name: Create Ubuntu VM on Proxmox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    proxmox_host: 192.168.1.192
+    proxmox_node: pve
+    proxmox_api_user: root@pam
+    proxmox_api_token_id: semaphore
+    proxmox_api_token_secret: "{{ lookup('ansible.builtin.env', 'PROXMOX_TOKEN_SECRET') }}"
+    template_vmid: 9000            # Ubuntu Cloud-Init template to clone
+    vm_cores: 2
+    vm_memory_mb: 4096
+    vm_disk_gb: 32                 # grown to this size after cloning
+    vm_storage: local-lvm
+    vm_bridge: vmbr0
+    vm_gateway: 192.168.1.1
+    vm_dns: 192.168.1.1
+    ci_user: clint
+    ci_ssh_pubkey: ""              # public key (not private) to install for ci_user
+    vm_start_on_boot: true
+  tasks:
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_id is defined
+          - vm_ip is defined
+          - proxmox_api_token_secret | length > 0
+          - ci_ssh_pubkey | length > 0
+        fail_msg: "Set vm_name, vm_id, vm_ip, ci_ssh_pubkey and PROXMOX_TOKEN_SECRET"
+
+    - name: Clone the template
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        clone: "{{ template_vmid }}"
+        newid: "{{ vm_id }}"
+        name: "{{ vm_name }}"
+        storage: "{{ vm_storage }}"
+        full: true
+        timeout: 300
+
+    - name: Configure CPU, memory, network, Cloud-Init and enable the guest agent
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ vm_id }}"
+        update: true
+        cores: "{{ vm_cores }}"
+        memory: "{{ vm_memory_mb }}"
+        agent: "enabled=1"
+        onboot: "{{ vm_start_on_boot }}"
+        net:
+          net0: "virtio,bridge={{ vm_bridge }}"
+        ipconfig:
+          ipconfig0: "ip={{ vm_ip }},gw={{ vm_gateway }}"
+        nameservers: "{{ vm_dns }}"
+        ciuser: "{{ ci_user }}"
+        sshkeys: "{{ ci_ssh_pubkey }}"
+
+    - name: Grow the system disk
+      community.general.proxmox_disk:
+        api_host: "{{ proxmox_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        vmid: "{{ vm_id }}"
+        disk: scsi0
+        size: "{{ vm_disk_gb }}G"
+        state: resized
+
+    - name: Start the VM
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ vm_id }}"
+        state: started
+
+    - name: Wait for SSH on the new VM
+      ansible.builtin.wait_for:
+        host: "{{ vm_ip.split('/')[0] }}"
+        port: 22
+        delay: 20
+        timeout: 600
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "VM {{ vm_name }} ({{ vm_id }}) is up at {{ vm_ip.split('/')[0] }}. Add it to the inventory, then run setup-docker-vm.yml."
