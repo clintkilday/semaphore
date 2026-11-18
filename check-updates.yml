@@ -1,0 +1,29 @@
+---
+# Read-only: report pending upgrades and reboot-required state. Installs nothing.
+- name: Check update status of managed VMs
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Refresh package lists
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+      changed_when: false
+
+    - name: Gather status
+      ansible.builtin.shell: |
+        echo "pending=$(apt-get -s dist-upgrade | grep -c '^Inst')"
+        echo "security=$(apt-get -s dist-upgrade | grep '^Inst' | grep -ci security)"
+        echo "reboot_required=$([ -f /var/run/reboot-required ] && echo yes || echo no)"
+        echo "kernel_running=$(uname -r)"
+        echo "os=$(. /etc/os-release; echo $PRETTY_NAME)"
+        echo "uptime=$(uptime -p)"
+      args:
+        executable: /bin/bash
+      register: st
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ st.stdout_lines | join(' | ') }}"
